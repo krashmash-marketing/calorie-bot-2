@@ -1,5 +1,3 @@
-
-
 import os
 import asyncio
 import base64
@@ -51,21 +49,30 @@ start_kb = ReplyKeyboardMarkup(
 )
 
 # -------------------------
-# HTTP сервер для Render
+# Простий HTTP сервер для Render
 # -------------------------
-async def handle_health_check(request):
-    return web.Response(text="🤖 Calorie Bot is running!")
+async def health_check(request):
+    return web.Response(text="🤖 Calorie Bot is running on Render!")
 
 def run_http_server():
+    """Запуск HTTP сервера в окремому потоці"""
     try:
         app = web.Application()
-        app.router.add_get('/', handle_health_check)
-        app.router.add_get('/health', handle_health_check)
-        web.run_app(app, host='0.0.0.0', port=8080, access_log=None)
+        app.router.add_get('/', health_check)
+        app.router.add_get('/health', health_check)
+        
+        # Запускаємо без signal handling для уникнення помилок
+        web.run_app(
+            app, 
+            host='0.0.0.0', 
+            port=8080, 
+            access_log=None,
+            print=None  # Вимкнути логи aiohttp
+        )
     except Exception as e:
         logger.error(f"HTTP server error: {e}")
 
-# Запуск HTTP сервера в окремому потоці
+# Запускаємо HTTP сервер
 http_thread = threading.Thread(target=run_http_server, daemon=True)
 http_thread.start()
 logger.info("🌐 HTTP сервер запущено на порті 8080")
@@ -353,7 +360,7 @@ async def help_handler(message: types.Message):
     await message.answer(help_text)
 
 # -------------------------
-# Запуск
+# Запуск бота
 # -------------------------
 async def main():
     logger.info("🤖 Бот запускається...")
