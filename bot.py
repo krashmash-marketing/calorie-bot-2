@@ -2,12 +2,12 @@ import os
 import asyncio
 import base64
 import aiohttp
-import aiosqlite
 import logging
 import re
 import threading
 import time
 import schedule
+import psycopg2
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from aiogram import Bot, Dispatcher, types
@@ -25,10 +25,10 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-DATABASE_URL = "calorie_bot.db"
-RENDER_URL = "https://calorie-bot-2-zyxe.onrender.com"  # Твій URL
+DATABASE_URL = os.getenv("DATABASE_URL")  # PostgreSQL URL з Render
+RENDER_URL = "https://calorie-bot-2-zyxe.onrender.com"
 
-if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
+if not TELEGRAM_TOKEN or not OPENAI_API_KEY or not DATABASE_URL:
     logger.error("❌ Токени не знайдено!")
     exit(1)
 
@@ -105,22 +105,33 @@ http_thread = threading.Thread(target=run_http_server, daemon=True)
 http_thread.start()
 
 # -------------------------
-# База даних
+# PostgreSQL База даних
 # -------------------------
+def get_db_connection():
+    """Створює з'єднання з PostgreSQL"""
+    return psycopg2.connect(DATABASE_URL)
+
 async def init_database():
-    async with aiosqlite.connect(DATABASE_URL) as db:
-        await db.execute('''
+    """Ініціалізація PostgreSQL бази"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Створюємо таблицю users
+        cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
+                user_id BIGINT PRIMARY KEY,
                 username TEXT,
                 first_name TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        await db.execute('''
+        
+        # Створюємо таблицю food_entries
+        cursor.execute('''
             CREATE TABLE IF NOT EXISTS food_entries (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
                 type TEXT,
                 input_data TEXT,
                 analysis_result TEXT,
@@ -132,48 +143,81 @@ async def init_database():
                 FOREIGN KEY (user_id) REFERENCES users (user_id)
             )
         ''')
-        await db.commit()
-    logger.info("✅ База даних ініціалізована")
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        logger.info("✅ PostgreSQL база даних ініціалізована")
+    except Exception as e:
+        logger.error(f"❌ Помилка ініціалізації бази: {e}")
 
 async def save_user(user_id: int, username: str, first_name: str):
-    async with aiosqlite.connect(DATABASE_URL) as db:
-        await db.execute('''
-            INSERT OR REPLACE INTO users (user_id, username, first_name) 
-            VALUES (?, ?, ?)
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO users (user_id, username, first_name) 
+            VALUES (%s, %s, %s)
+            ON CONFLICT (user_id) DO UPDATE SET
+            username = EXCLUDED.username,
+            first_name = EXCLUDED.first_name
         ''', (user_id, username, first_name))
-        await db.commit()
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Помилка збереження користувача: {e}")
 
 async def save_food_analysis(user_id: int, entry_type: str, input_data: str, analysis_result: str, calories: int = None, proteins: float = None, fats: float = None, carbs: float = None):
-    async with aiosqlite.connect(DATABASE_URL) as db:
-        await db.execute('''
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
             INSERT INTO food_entries 
             (user_id, type, input_data, analysis_result, calories, proteins, fats, carbs)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         ''', (user_id, entry_type, input_data, analysis_result, calories, proteins, fats, carbs))
-        await db.commit()
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Помилка збереження аналізу: {e}")
 
 async def get_user_statistics(user_id: int) -> dict:
-    async with aiosqlite.connect(DATABASE_URL) as db:
-        cursor = await db.execute('SELECT COUNT(*) FROM food_entries WHERE user_id = ?', (user_id,))
-        total_entries = (await cursor.fetchone())[0]
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
         
-        cursor = await db.execute('SELECT AVG(calories) FROM food_entries WHERE user_id = ? AND calories IS NOT NULL', (user_id,))
-        avg_calories = (await cursor.fetchone())[0]
+        # Загальна кількість записів
+        cursor.execute('SELECT COUNT(*) FROM food_entries WHERE user_id = %s', (user_id,))
+        total_entries = cursor.fetchone()[0]
         
-        cursor = await db.execute('''
+        # Середні калорії
+        cursor.execute('SELECT AVG(calories) FROM food_entries WHERE user_id = %s AND calories IS NOT NULL', (user_id,))
+        avg_calories_result = cursor.fetchone()[0]
+        avg_calories = avg_calories_result if avg_calories_result is not None else 0
+        
+        # Останні записи
+        cursor.execute('''
             SELECT analysis_result, created_at 
             FROM food_entries 
-            WHERE user_id = ? 
+            WHERE user_id = %s 
             ORDER BY created_at DESC 
             LIMIT 5
         ''', (user_id,))
-        recent_entries = await cursor.fetchall()
+        recent_entries = cursor.fetchall()
+        
+        cursor.close()
+        conn.close()
         
         return {
             'total_entries': total_entries,
-            'avg_calories': round(avg_calories, 1) if avg_calories else 0,
+            'avg_calories': round(avg_calories, 1),
             'recent_entries': recent_entries
         }
+    except Exception as e:
+        logger.error(f"Помилка отримання статистики: {e}")
+        return {'total_entries': 0, 'avg_calories': 0, 'recent_entries': []}
 
 # -------------------------
 # Аналіз фото
@@ -366,7 +410,7 @@ async def statistics_handler(message: types.Message):
 """
         
         for i, (analysis, created_at) in enumerate(stats['recent_entries'], 1):
-            date_str = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S').strftime('%d.%m %H:%M')
+            date_str = created_at.strftime('%d.%m %H:%M') if isinstance(created_at, datetime) else str(created_at)
             preview = analysis[:50] + "..." if len(analysis) > 50 else analysis
             stats_text += f"{i}. {date_str}: {preview}\n"
         
