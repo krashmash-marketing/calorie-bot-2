@@ -13,7 +13,7 @@ from aiogram.filters import Command
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram.client.session.aiohttp import AiohttpSession
-import openai
+from openai import OpenAI  # Нова версія імпорту
 
 # -------------------------
 # Налаштування
@@ -31,8 +31,8 @@ if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
 
 logger.info("✅ Ключі завантажені успішно")
 
-# Ініціалізація
-openai.api_key = OPENAI_API_KEY
+# Ініціалізація (НОВА ВЕРСІЯ)
+openai_client = OpenAI(api_key=OPENAI_API_KEY)  # Нова ініціалізація
 storage = MemoryStorage()
 session = AiohttpSession()
 bot = Bot(token=TELEGRAM_TOKEN, session=session)
@@ -55,20 +55,17 @@ class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ['/', '/health']:
             self.send_response(200)
-            self.send_header('Content-type', 'text/plain; charset=utf-8')
+            self.send_header('Content-type', 'text/plain')
             self.end_headers()
-            # Використовуємо encode для UTF-8 замість b""
-            self.wfile.write("🤖 Calorie Bot is running on Render!".encode('utf-8'))
+            self.wfile.write(b"Calorie Bot is running on Render!")
         else:
             self.send_response(404)
             self.end_headers()
     
     def log_message(self, format, *args):
-        # Вимкнути логи HTTP сервера
         return
 
 def run_http_server():
-    """Запуск простого HTTP сервера"""
     try:
         server = HTTPServer(('0.0.0.0', 8080), HealthHandler)
         logger.info("🌐 HTTP сервер запущено на порті 8080")
@@ -152,7 +149,7 @@ async def get_user_statistics(user_id: int) -> dict:
         }
 
 # -------------------------
-# Аналіз фото (залишається без змін)
+# Аналіз фото (ОНОВЛЕНО для нової версії OpenAI)
 # -------------------------
 async def download_and_encode_image(image_url: str) -> str:
     try:
@@ -171,8 +168,8 @@ async def analyze_image_with_openai(image_url: str) -> str:
         base64_image = await download_and_encode_image(image_url)
         
         def sync_openai_call():
-            response = openai.ChatCompletion.create(
-                model="gpt-4",
+            response = openai_client.chat.completions.create(
+                model="gpt-4o",  # Модель що підтримує зображення
                 messages=[{
                     "role": "user",
                     "content": [
@@ -283,7 +280,7 @@ async def handle_text_description(message: types.Message):
         processing_msg = await message.answer("🤔 Аналізую опис страви...")
         
         def analyze_text_with_openai(text: str) -> str:
-            response = openai.ChatCompletion.create(
+            response = openai_client.chat.completions.create(  # Оновлений виклик
                 model="gpt-3.5-turbo",
                 messages=[{
                     "role": "user", 
