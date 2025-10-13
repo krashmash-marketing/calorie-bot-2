@@ -55,9 +55,10 @@ class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ['/', '/health']:
             self.send_response(200)
-            self.send_header('Content-type', 'text/plain')
+            self.send_header('Content-type', 'text/plain; charset=utf-8')
             self.end_headers()
-            self.wfile.write(b"🤖 Calorie Bot is running on Render!")
+            # Використовуємо encode для UTF-8 замість b""
+            self.wfile.write("🤖 Calorie Bot is running on Render!".encode('utf-8'))
         else:
             self.send_response(404)
             self.end_headers()
