@@ -6,6 +6,8 @@ import aiosqlite
 import logging
 import re
 import threading
+import time
+import schedule
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from aiogram import Bot, Dispatcher, types
@@ -13,7 +15,7 @@ from aiogram.filters import Command
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram.client.session.aiohttp import AiohttpSession
-from openai import OpenAI  # Нова версія імпорту
+from openai import OpenAI
 
 # -------------------------
 # Налаштування
@@ -24,6 +26,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DATABASE_URL = "calorie_bot.db"
+RENDER_URL = "https://calorie-bot-2-zyxe.onrender.com"  # Твій URL
 
 if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
     logger.error("❌ Токени не знайдено!")
@@ -31,8 +34,8 @@ if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
 
 logger.info("✅ Ключі завантажені успішно")
 
-# Ініціалізація (НОВА ВЕРСІЯ)
-openai_client = OpenAI(api_key=OPENAI_API_KEY)  # Нова ініціалізація
+# Ініціалізація
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
 storage = MemoryStorage()
 session = AiohttpSession()
 bot = Bot(token=TELEGRAM_TOKEN, session=session)
@@ -49,11 +52,35 @@ start_kb = ReplyKeyboardMarkup(
 )
 
 # -------------------------
-# Простий HTTP сервер без aiohttp
+# Пінг-функція для уникнення засинання
+# -------------------------
+def ping_server():
+    """Періодично пінгує сервер щоб не засинав"""
+    try:
+        import requests
+        response = requests.get(f"{RENDER_URL}/health", timeout=10)
+        logger.info(f"🏓 Пінг успішний: {response.status_code}")
+    except Exception as e:
+        logger.warning(f"🏓 Пінг невдалий: {e}")
+
+def run_ping_scheduler():
+    """Запускає пінг кожні 10 хвилин"""
+    schedule.every(10).minutes.do(ping_server)
+    while True:
+        schedule.run_pending()
+        time.sleep(60)
+
+# Запускаємо пінг-сервіс
+ping_thread = threading.Thread(target=run_ping_scheduler, daemon=True)
+ping_thread.start()
+logger.info("🏓 Пінг-сервіс запущено (кожні 10 хвилин)")
+
+# -------------------------
+# Простий HTTP сервер
 # -------------------------
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path in ['/', '/health']:
+        if self.path in ['/', '/health', '/ping']:
             self.send_response(200)
             self.send_header('Content-type', 'text/plain')
             self.end_headers()
@@ -73,12 +100,12 @@ def run_http_server():
     except Exception as e:
         logger.error(f"HTTP server error: {e}")
 
-# Запускаємо HTTP сервер в окремому потоці
+# Запускаємо HTTP сервер
 http_thread = threading.Thread(target=run_http_server, daemon=True)
 http_thread.start()
 
 # -------------------------
-# База даних (залишається без змін)
+# База даних
 # -------------------------
 async def init_database():
     async with aiosqlite.connect(DATABASE_URL) as db:
@@ -149,7 +176,7 @@ async def get_user_statistics(user_id: int) -> dict:
         }
 
 # -------------------------
-# Аналіз фото (ОНОВЛЕНО для нової версії OpenAI)
+# Аналіз фото
 # -------------------------
 async def download_and_encode_image(image_url: str) -> str:
     try:
@@ -169,7 +196,7 @@ async def analyze_image_with_openai(image_url: str) -> str:
         
         def sync_openai_call():
             response = openai_client.chat.completions.create(
-                model="gpt-4o",  # Модель що підтримує зображення
+                model="gpt-4o",
                 messages=[{
                     "role": "user",
                     "content": [
@@ -231,7 +258,7 @@ def parse_nutrition_from_response(response: str) -> tuple:
         return None, None, None, None
 
 # -------------------------
-# Хендлери (залишаються без змін)
+# Хендлери
 # -------------------------
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
@@ -280,7 +307,7 @@ async def handle_text_description(message: types.Message):
         processing_msg = await message.answer("🤔 Аналізую опис страви...")
         
         def analyze_text_with_openai(text: str) -> str:
-            response = openai_client.chat.completions.create(  # Оновлений виклик
+            response = openai_client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[{
                     "role": "user", 
