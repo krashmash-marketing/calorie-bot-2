@@ -7,7 +7,7 @@ import logging
 import re
 import threading
 from datetime import datetime
-from aiohttp import web
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -49,36 +49,38 @@ start_kb = ReplyKeyboardMarkup(
 )
 
 # -------------------------
-# Простий HTTP сервер для Render
+# Простий HTTP сервер без aiohttp
 # -------------------------
-async def health_check(request):
-    return web.Response(text="🤖 Calorie Bot is running on Render!")
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path in ['/', '/health']:
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b"🤖 Calorie Bot is running on Render!")
+        else:
+            self.send_response(404)
+            self.end_headers()
+    
+    def log_message(self, format, *args):
+        # Вимкнути логи HTTP сервера
+        return
 
 def run_http_server():
-    """Запуск HTTP сервера в окремому потоці"""
+    """Запуск простого HTTP сервера"""
     try:
-        app = web.Application()
-        app.router.add_get('/', health_check)
-        app.router.add_get('/health', health_check)
-        
-        # Запускаємо без signal handling для уникнення помилок
-        web.run_app(
-            app, 
-            host='0.0.0.0', 
-            port=8080, 
-            access_log=None,
-            print=None  # Вимкнути логи aiohttp
-        )
+        server = HTTPServer(('0.0.0.0', 8080), HealthHandler)
+        logger.info("🌐 HTTP сервер запущено на порті 8080")
+        server.serve_forever()
     except Exception as e:
         logger.error(f"HTTP server error: {e}")
 
-# Запускаємо HTTP сервер
+# Запускаємо HTTP сервер в окремому потоці
 http_thread = threading.Thread(target=run_http_server, daemon=True)
 http_thread.start()
-logger.info("🌐 HTTP сервер запущено на порті 8080")
 
 # -------------------------
-# База даних
+# База даних (залишається без змін)
 # -------------------------
 async def init_database():
     async with aiosqlite.connect(DATABASE_URL) as db:
@@ -149,7 +151,7 @@ async def get_user_statistics(user_id: int) -> dict:
         }
 
 # -------------------------
-# Аналіз фото
+# Аналіз фото (залишається без змін)
 # -------------------------
 async def download_and_encode_image(image_url: str) -> str:
     try:
@@ -231,7 +233,7 @@ def parse_nutrition_from_response(response: str) -> tuple:
         return None, None, None, None
 
 # -------------------------
-# Хендлери
+# Хендлери (залишаються без змін)
 # -------------------------
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
