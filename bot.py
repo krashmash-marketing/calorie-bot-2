@@ -7,7 +7,9 @@ import aiohttp
 import aiosqlite
 import logging
 import re
+import threading
 from datetime import datetime
+from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -47,6 +49,26 @@ start_kb = ReplyKeyboardMarkup(
     ],
     resize_keyboard=True
 )
+
+# -------------------------
+# HTTP сервер для Render
+# -------------------------
+async def handle_health_check(request):
+    return web.Response(text="🤖 Calorie Bot is running!")
+
+def run_http_server():
+    try:
+        app = web.Application()
+        app.router.add_get('/', handle_health_check)
+        app.router.add_get('/health', handle_health_check)
+        web.run_app(app, host='0.0.0.0', port=8080, access_log=None)
+    except Exception as e:
+        logger.error(f"HTTP server error: {e}")
+
+# Запуск HTTP сервера в окремому потоці
+http_thread = threading.Thread(target=run_http_server, daemon=True)
+http_thread.start()
+logger.info("🌐 HTTP сервер запущено на порті 8080")
 
 # -------------------------
 # База даних
