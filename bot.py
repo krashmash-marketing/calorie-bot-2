@@ -1,50 +1,44 @@
 
+
 import os
 import asyncio
 import base64
 import aiohttp
 import aiosqlite
 import logging
+import re
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram.client.session.aiohttp import AiohttpSession
-from openai import OpenAI
+import openai
 
-# 🚨 ДОДАЙ ЛОГУВАННЯ ДЛЯ ПРОДАКШЕНУ
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+# -------------------------
+# Налаштування
+# -------------------------
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Отримуємо токени з змінних оточення (Railway додасть їх)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-DATABASE_URL = os.getenv("DATABASE_URL", "calorie_bot.db")
+DATABASE_URL = "calorie_bot.db"
 
-if not TELEGRAM_TOKEN:
-    logger.error("❌ TELEGRAM_TOKEN не знайдено!")
-    exit(1)
-
-if not OPENAI_API_KEY:
-    logger.error("❌ OPENAI_API_KEY не знайдено!")
+if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
+    logger.error("❌ Токени не знайдено!")
     exit(1)
 
 logger.info("✅ Ключі завантажені успішно")
 
-# Ініціалізація бота
+# Ініціалізація
+openai.api_key = OPENAI_API_KEY
 storage = MemoryStorage()
 session = AiohttpSession()
 bot = Bot(token=TELEGRAM_TOKEN, session=session)
 dp = Dispatcher(storage=storage)
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-# -------------------------
-# Кнопки
-# -------------------------
+# Клавіатура
 start_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📸 Аналізувати фото")],
@@ -55,10 +49,9 @@ start_kb = ReplyKeyboardMarkup(
 )
 
 # -------------------------
-# Ініціалізація бази даних
+# База даних
 # -------------------------
 async def init_database():
-    """Ініціалізація таблиць бази даних"""
     async with aiosqlite.connect(DATABASE_URL) as db:
         await db.execute('''
             CREATE TABLE IF NOT EXISTS users (
@@ -68,31 +61,25 @@ async def init_database():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        
         await db.execute('''
             CREATE TABLE IF NOT EXISTS food_entries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER,
-                type TEXT, -- 'photo' або 'text'
-                input_data TEXT, -- текст опису або file_path фото
+                type TEXT,
+                input_data TEXT,
                 analysis_result TEXT,
                 calories INTEGER,
                 proteins REAL,
-                fats REAL, 
+                fats REAL,
                 carbs REAL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users (user_id)
             )
         ''')
-        
         await db.commit()
-        print("✅ База даних ініціалізована")
+    logger.info("✅ База даних ініціалізована")
 
-# -------------------------
-# Функції для роботи з базою даних
-# -------------------------
 async def save_user(user_id: int, username: str, first_name: str):
-    """Збереження/оновлення користувача"""
     async with aiosqlite.connect(DATABASE_URL) as db:
         await db.execute('''
             INSERT OR REPLACE INTO users (user_id, username, first_name) 
@@ -100,17 +87,7 @@ async def save_user(user_id: int, username: str, first_name: str):
         ''', (user_id, username, first_name))
         await db.commit()
 
-async def save_food_analysis(
-    user_id: int, 
-    entry_type: str, 
-    input_data: str, 
-    analysis_result: str,
-    calories: int = None,
-    proteins: float = None,
-    fats: float = None,
-    carbs: float = None
-):
-    """Збереження аналізу їжі"""
+async def save_food_analysis(user_id: int, entry_type: str, input_data: str, analysis_result: str, calories: int = None, proteins: float = None, fats: float = None, carbs: float = None):
     async with aiosqlite.connect(DATABASE_URL) as db:
         await db.execute('''
             INSERT INTO food_entries 
@@ -120,23 +97,13 @@ async def save_food_analysis(
         await db.commit()
 
 async def get_user_statistics(user_id: int) -> dict:
-    """Отримання статистики користувача"""
     async with aiosqlite.connect(DATABASE_URL) as db:
-        # Загальна кількість записів
-        cursor = await db.execute(
-            'SELECT COUNT(*) FROM food_entries WHERE user_id = ?', 
-            (user_id,)
-        )
+        cursor = await db.execute('SELECT COUNT(*) FROM food_entries WHERE user_id = ?', (user_id,))
         total_entries = (await cursor.fetchone())[0]
         
-        # Середні калорії
-        cursor = await db.execute(
-            'SELECT AVG(calories) FROM food_entries WHERE user_id = ? AND calories IS NOT NULL', 
-            (user_id,)
-        )
+        cursor = await db.execute('SELECT AVG(calories) FROM food_entries WHERE user_id = ? AND calories IS NOT NULL', (user_id,))
         avg_calories = (await cursor.fetchone())[0]
         
-        # Останні записи
         cursor = await db.execute('''
             SELECT analysis_result, created_at 
             FROM food_entries 
@@ -153,84 +120,27 @@ async def get_user_statistics(user_id: int) -> dict:
         }
 
 # -------------------------
-# Хендлер для /start
+# Аналіз фото
 # -------------------------
-@dp.message(Command("start"))
-async def start_handler(message: types.Message):
-    # Зберігаємо користувача в базу
-    await save_user(
-        message.from_user.id,
-        message.from_user.username,
-        message.from_user.first_name
-    )
-    
-    welcome_text = """
-🍏 **CalorieBot - твій помічник у харчуванні!**
-
-Що я вмію:
-📸 **Аналіз фото** - надішли фото їжі
-📝 **Аналіз тексту** - опиши страву текстом
-📊 **Статистика** - переглядай свою історію
-
-Всі твої аналізи зберігаються! 🗃️
-"""
-    await message.answer(welcome_text, reply_markup=start_kb)
-
-# -------------------------
-# Функція для парсингу калорій з відповіді GPT
-# -------------------------
-def parse_nutrition_from_response(response: str) -> tuple:
-    """Парсинг калорій та нутрієнтів з відповіді GPT"""
-    try:
-        calories = None
-        proteins = None
-        fats = None
-        carbs = None
-        
-        # Спрощений парсинг (можна покращити)
-        lines = response.split('\n')
-        for line in lines:
-            line_lower = line.lower()
-            if 'калорійність' in line_lower or 'калорії' in line_lower:
-                # Шукаємо числа у рядку
-                import re
-                numbers = re.findall(r'\d+', line)
-                if numbers:
-                    calories = int(numbers[0])
-            elif 'білки' in line_lower:
-                numbers = re.findall(r'\d+', line)
-                if numbers:
-                    proteins = float(numbers[0])
-            elif 'жири' in line_lower:
-                numbers = re.findall(r'\d+', line)
-                if numbers:
-                    fats = float(numbers[0])
-            elif 'вуглеводи' in line_lower:
-                numbers = re.findall(r'\d+', line)
-                if numbers:
-                    carbs = float(numbers[0])
-                    
-        return calories, proteins, fats, carbs
-    except:
-        return None, None, None, None
-
-# -------------------------
-# Функція для аналізу фото через OpenAI
-# -------------------------
-async def analyze_image_with_openai(image_url: str) -> str:
-    """Асинхронна функція для аналізу фото"""
+async def download_and_encode_image(image_url: str) -> str:
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(image_url) as response:
                 if response.status == 200:
                     image_data = await response.read()
-                    base64_image = base64.b64encode(image_data).decode('utf-8')
+                    return base64.b64encode(image_data).decode('utf-8')
                 else:
                     raise Exception(f"HTTP помилка: {response.status}")
+    except Exception as e:
+        raise Exception(f"Помилка завантаження: {str(e)}")
+
+async def analyze_image_with_openai(image_url: str) -> str:
+    try:
+        base64_image = await download_and_encode_image(image_url)
         
         def sync_openai_call():
-            response = openai_client.chat.completions.create(
-                model="gpt-4o",
+            response = openai.ChatCompletion.create(
+                model="gpt-4",
                 messages=[{
                     "role": "user",
                     "content": [
@@ -265,9 +175,48 @@ async def analyze_image_with_openai(image_url: str) -> str:
     except Exception as e:
         return f"❌ Помилка аналізу: {str(e)}"
 
+def parse_nutrition_from_response(response: str) -> tuple:
+    try:
+        calories = proteins = fats = carbs = None
+        lines = response.split('\n')
+        for line in lines:
+            line_lower = line.lower()
+            if 'калорійність' in line_lower or 'калорії' in line_lower:
+                numbers = re.findall(r'\d+', line)
+                if numbers:
+                    calories = int(numbers[0])
+            elif 'білки' in line_lower:
+                numbers = re.findall(r'\d+\.?\d*', line)
+                if numbers:
+                    proteins = float(numbers[0])
+            elif 'жири' in line_lower:
+                numbers = re.findall(r'\d+\.?\d*', line)
+                if numbers:
+                    fats = float(numbers[0])
+            elif 'вуглеводи' in line_lower:
+                numbers = re.findall(r'\d+\.?\d*', line)
+                if numbers:
+                    carbs = float(numbers[0])
+        return calories, proteins, fats, carbs
+    except:
+        return None, None, None, None
+
 # -------------------------
-# Хендлер для фото
+# Хендлери
 # -------------------------
+@dp.message(Command("start"))
+async def start_handler(message: types.Message):
+    await save_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
+    welcome_text = """
+🍏 **CalorieBot - твій помічник у харчуванні!**
+
+Що я вмію:
+📸 **Аналіз фото** - надішли фото їжі
+📝 **Аналіз тексту** - опиши страву текстом
+📊 **Статистика** - переглядай свою історію
+"""
+    await message.answer(welcome_text, reply_markup=start_kb)
+
 @dp.message(lambda message: message.photo or message.text == "📸 Аналізувати фото")
 async def handle_photo(message: types.Message):
     if message.photo:
@@ -277,14 +226,9 @@ async def handle_photo(message: types.Message):
             file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info.file_path}"
             
             processing_msg = await message.answer("🔄 Завантажую та аналізую фото...")
-            
-            # Аналізуємо фото
             analysis_result = await analyze_image_with_openai(file_url)
-            
-            # Парсимо нутрієнти
             calories, proteins, fats, carbs = parse_nutrition_from_response(analysis_result)
             
-            # Зберігаємо в базу
             await save_food_analysis(
                 user_id=message.from_user.id,
                 entry_type="photo",
@@ -296,26 +240,18 @@ async def handle_photo(message: types.Message):
                 carbs=carbs
             )
             
-            await processing_msg.edit_text(
-                f"🔍 **Результат аналізу:**\n\n{analysis_result}\n\n"
-                f"💾 **Збережено в історію!**"
-            )
+            await processing_msg.edit_text(f"🔍 **Результат аналізу:**\n\n{analysis_result}\n\n💾 **Збережено в історію!**")
             
         except Exception as e:
             await message.answer(f"❌ Помилка: {str(e)}")
 
-# -------------------------
-# Хендлер для текстового опису
-# -------------------------
-@dp.message(lambda message: message.text and message.text not in [
-    "/start", "📸 Аналізувати фото", "📊 Моя статистика", "ℹ️ Допомога"
-])
+@dp.message(lambda message: message.text and message.text not in ["/start", "📸 Аналізувати фото", "📊 Моя статистика", "ℹ️ Допомога"])
 async def handle_text_description(message: types.Message):
     try:
         processing_msg = await message.answer("🤔 Аналізую опис страви...")
         
         def analyze_text_with_openai(text: str) -> str:
-            response = openai_client.chat.completions.create(
+            response = openai.ChatCompletion.create(
                 model="gpt-3.5-turbo",
                 messages=[{
                     "role": "user", 
@@ -337,11 +273,8 @@ async def handle_text_description(message: types.Message):
             return response.choices[0].message.content
         
         analysis_result = await asyncio.to_thread(analyze_text_with_openai, message.text)
-        
-        # Парсимо нутрієнти
         calories, proteins, fats, carbs = parse_nutrition_from_response(analysis_result)
         
-        # Зберігаємо в базу
         await save_food_analysis(
             user_id=message.from_user.id,
             entry_type="text",
@@ -353,17 +286,11 @@ async def handle_text_description(message: types.Message):
             carbs=carbs
         )
         
-        await processing_msg.edit_text(
-            f"🔍 **Результат аналізу:**\n\n{analysis_result}\n\n"
-            f"💾 **Збережено в історію!**"
-        )
+        await processing_msg.edit_text(f"🔍 **Результат аналізу:**\n\n{analysis_result}\n\n💾 **Збережено в історію!**")
         
     except Exception as e:
         await message.answer(f"❌ Помилка: {str(e)}")
 
-# -------------------------
-# Хендлер статистики
-# -------------------------
 @dp.message(lambda message: message.text == "📊 Моя статистика")
 async def statistics_handler(message: types.Message):
     try:
@@ -384,7 +311,6 @@ async def statistics_handler(message: types.Message):
         
         for i, (analysis, created_at) in enumerate(stats['recent_entries'], 1):
             date_str = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S').strftime('%d.%m %H:%M')
-            # Беремо перші 50 символів аналізу
             preview = analysis[:50] + "..." if len(analysis) > 50 else analysis
             stats_text += f"{i}. {date_str}: {preview}\n"
         
@@ -393,9 +319,6 @@ async def statistics_handler(message: types.Message):
     except Exception as e:
         await message.answer(f"❌ Помилка отримання статистики: {str(e)}")
 
-# -------------------------
-# Хендлер допомоги
-# -------------------------
 @dp.message(lambda message: message.text == "ℹ️ Допомога")
 async def help_handler(message: types.Message):
     help_text = """
@@ -404,21 +327,15 @@ async def help_handler(message: types.Message):
 1. **Фото аналіз** - надішли чітке фото їжі
 2. **Текстовий аналіз** - опиши страву текстом
 3. **Статистика** - переглядай історію аналізів
-
-**Всі ваші дані зберігаються локально!**
 """
     await message.answer(help_text)
 
 # -------------------------
-# Запуск бота
+# Запуск
 # -------------------------
 async def main():
-    print("🤖 Бот запускається...")
-    
-    # Ініціалізуємо базу даних
+    logger.info("🤖 Бот запускається...")
     await init_database()
-    
-    # Запускаємо бота
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
