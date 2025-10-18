@@ -1,31 +1,32 @@
-
 import os
 import asyncio
 import base64
 import aiohttp
 import logging
 import re
+import threading
 import time
+import schedule
 import psycopg2
 from datetime import datetime
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram.client.session.aiohttp import AiohttpSession
 from openai import OpenAI
-from psycopg2 import OperationalError, InterfaceError
 
 # -------------------------
 # Налаштування
 # -------------------------
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-DATABASE_URL = os.getenv("DATABASE_URL")
-RENDER_URL = os.getenv("RENDER_URL", "https://calorie-bot-2-zyxe.onrender.com")
+DATABASE_URL = os.getenv("DATABASE_URL")  # PostgreSQL URL з Render
+RENDER_URL = "https://calorie-bot-2-zyxe.onrender.com"
 
 if not TELEGRAM_TOKEN or not OPENAI_API_KEY or not DATABASE_URL:
     logger.error("❌ Токени не знайдено!")
@@ -51,47 +52,64 @@ start_kb = ReplyKeyboardMarkup(
 )
 
 # -------------------------
-# Асинхронний пінг для уникнення засинання
+# Пінг-функція для уникнення засинання
 # -------------------------
-async def async_ping_server():
-    """Асинхронний пінг сервера"""
+def ping_server():
+    """Періодично пінгує сервер щоб не засинав"""
     try:
-        timeout = aiohttp.ClientTimeout(total=10)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(f"{RENDER_URL}/health") as response:
-                logger.info(f"🏓 Пінг успішний: {response.status}")
-                return True
+        import requests
+        response = requests.get(f"{RENDER_URL}/health", timeout=10)
+        logger.info(f"🏓 Пінг успішний: {response.status_code}")
     except Exception as e:
         logger.warning(f"🏓 Пінг невдалий: {e}")
-        return False
 
-async def run_async_ping():
-    """Запускає асинхронний пінг кожні 5 хвилин"""
+def run_ping_scheduler():
+    """Запускає пінг кожні 10 хвилин"""
+    schedule.every(10).minutes.do(ping_server)
     while True:
-        await async_ping_server()
-        await asyncio.sleep(300)  # 5 хвилин
+        schedule.run_pending()
+        time.sleep(60)
+
+# Запускаємо пінг-сервіс
+ping_thread = threading.Thread(target=run_ping_scheduler, daemon=True)
+ping_thread.start()
+logger.info("🏓 Пінг-сервіс запущено (кожні 10 хвилин)")
+
+# -------------------------
+# Простий HTTP сервер
+# -------------------------
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path in ['/', '/health', '/ping']:
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b"Calorie Bot is running on Render!")
+        else:
+            self.send_response(404)
+            self.end_headers()
+    
+    def log_message(self, format, *args):
+        return
+
+def run_http_server():
+    try:
+        server = HTTPServer(('0.0.0.0', 8080), HealthHandler)
+        logger.info("🌐 HTTP сервер запущено на порті 8080")
+        server.serve_forever()
+    except Exception as e:
+        logger.error(f"HTTP server error: {e}")
+
+# Запускаємо HTTP сервер
+http_thread = threading.Thread(target=run_http_server, daemon=True)
+http_thread.start()
 
 # -------------------------
 # PostgreSQL База даних
 # -------------------------
-def get_db_connection(max_retries=3, retry_delay=1):
-    """Створює з'єднання з PostgreSQL з повторними спробами"""
-    for attempt in range(max_retries):
-        try:
-            conn = psycopg2.connect(DATABASE_URL)
-            # Перевіряємо з'єднання
-            cursor = conn.cursor()
-            cursor.execute("SELECT 1")
-            cursor.close()
-            logger.info("✅ Успішне підключення до PostgreSQL")
-            return conn
-        except (OperationalError, InterfaceError) as e:
-            logger.warning(f"⚠️ Спроба {attempt + 1} невдала: {e}")
-            if attempt < max_retries - 1:
-                time.sleep(retry_delay)
-            else:
-                logger.error(f"❌ Не вдалося підключитися до БД після {max_retries} спроб")
-                raise
+def get_db_connection():
+    """Створює з'єднання з PostgreSQL"""
+    return psycopg2.connect(DATABASE_URL)
 
 async def init_database():
     """Ініціалізація PostgreSQL бази"""
@@ -134,7 +152,6 @@ async def init_database():
         logger.error(f"❌ Помилка ініціалізації бази: {e}")
 
 async def save_user(user_id: int, username: str, first_name: str):
-    """Зберігає користувача в базу даних"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -144,16 +161,14 @@ async def save_user(user_id: int, username: str, first_name: str):
             ON CONFLICT (user_id) DO UPDATE SET
             username = EXCLUDED.username,
             first_name = EXCLUDED.first_name
-        ''', (user_id, username or "", first_name or ""))
+        ''', (user_id, username, first_name))
         conn.commit()
         cursor.close()
         conn.close()
-        logger.info(f"✅ Користувач {user_id} збережений")
     except Exception as e:
-        logger.error(f"❌ Помилка збереження користувача {user_id}: {e}")
+        logger.error(f"Помилка збереження користувача: {e}")
 
 async def save_food_analysis(user_id: int, entry_type: str, input_data: str, analysis_result: str, calories: int = None, proteins: float = None, fats: float = None, carbs: float = None):
-    """Зберігає аналіз їжі в базу даних"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -165,12 +180,10 @@ async def save_food_analysis(user_id: int, entry_type: str, input_data: str, ana
         conn.commit()
         cursor.close()
         conn.close()
-        logger.info(f"✅ Аналіз для {user_id} збережений")
     except Exception as e:
-        logger.error(f"❌ Помилка збереження аналізу для {user_id}: {e}")
+        logger.error(f"Помилка збереження аналізу: {e}")
 
 async def get_user_statistics(user_id: int) -> dict:
-    """Отримує статистику користувача"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -203,40 +216,15 @@ async def get_user_statistics(user_id: int) -> dict:
             'recent_entries': recent_entries
         }
     except Exception as e:
-        logger.error(f"❌ Помилка отримання статистики: {e}")
+        logger.error(f"Помилка отримання статистики: {e}")
         return {'total_entries': 0, 'avg_calories': 0, 'recent_entries': []}
-
-async def check_database_health():
-    """Перевіряє стан бази даних"""
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # Перевіряємо таблицю users
-        cursor.execute("SELECT COUNT(*) FROM users")
-        users_count = cursor.fetchone()[0]
-        
-        # Перевіряємо таблицю food_entries
-        cursor.execute("SELECT COUNT(*) FROM food_entries")
-        entries_count = cursor.fetchone()[0]
-        
-        cursor.close()
-        conn.close()
-        
-        logger.info(f"📊 Стан БД: {users_count} користувачів, {entries_count} записів")
-        return True
-    except Exception as e:
-        logger.error(f"❌ Проблема з БД: {e}")
-        return False
 
 # -------------------------
 # Аналіз фото
 # -------------------------
 async def download_and_encode_image(image_url: str) -> str:
-    """Завантажує та кодує зображення в base64"""
     try:
-        timeout = aiohttp.ClientTimeout(total=30)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with aiohttp.ClientSession() as session:
             async with session.get(image_url) as response:
                 if response.status == 200:
                     image_data = await response.read()
@@ -247,7 +235,6 @@ async def download_and_encode_image(image_url: str) -> str:
         raise Exception(f"Помилка завантаження: {str(e)}")
 
 async def analyze_image_with_openai(image_url: str) -> str:
-    """Аналізує зображення їжі через OpenAI"""
     try:
         base64_image = await download_and_encode_image(image_url)
         
@@ -286,11 +273,9 @@ async def analyze_image_with_openai(image_url: str) -> str:
         return result
         
     except Exception as e:
-        logger.error(f"❌ Помилка аналізу зображення: {e}")
         return f"❌ Помилка аналізу: {str(e)}"
 
 def parse_nutrition_from_response(response: str) -> tuple:
-    """Парсить відповідь GPT для отримання поживних речовин"""
     try:
         calories = proteins = fats = carbs = None
         lines = response.split('\n')
@@ -313,8 +298,7 @@ def parse_nutrition_from_response(response: str) -> tuple:
                 if numbers:
                     carbs = float(numbers[0])
         return calories, proteins, fats, carbs
-    except Exception as e:
-        logger.error(f"❌ Помилка парсингу відповіді: {e}")
+    except:
         return None, None, None, None
 
 # -------------------------
@@ -322,10 +306,8 @@ def parse_nutrition_from_response(response: str) -> tuple:
 # -------------------------
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
-    """Обробник команди /start"""
-    try:
-        await save_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
-        welcome_text = """
+    await save_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
+    welcome_text = """
 🍏 **CalorieBot - твій помічник у харчуванні!**
 
 Що я вмію:
@@ -333,86 +315,40 @@ async def start_handler(message: types.Message):
 📝 **Аналіз тексту** - опиши страву текстом
 📊 **Статистика** - переглядай свою історію
 """
-        await message.answer(welcome_text, reply_markup=start_kb)
-    except Exception as e:
-        logger.error(f"❌ Помилка в start_handler: {e}")
-        await message.answer("❌ Сталася помилка. Спробуйте ще раз.")
-
-@dp.message(Command("ping"))
-async def ping_command(message: types.Message):
-    """Команда для перевірки роботи бота"""
-    try:
-        ping_result = await async_ping_server()
-        db_health = await check_database_health()
-        
-        status_text = "🏓 Бот працює!\n"
-        status_text += f"📊 База даних: {'✅ OK' if db_health else '❌ Проблема'}\n"
-        status_text += f"🌐 Пінг сервера: {'✅ OK' if ping_result else '❌ Проблема'}"
-        
-        await message.answer(status_text)
-    except Exception as e:
-        await message.answer(f"❌ Помилка перевірки статусу: {e}")
+    await message.answer(welcome_text, reply_markup=start_kb)
 
 @dp.message(lambda message: message.photo or message.text == "📸 Аналізувати фото")
 async def handle_photo(message: types.Message):
-    """Обробник фото та кнопки аналізу"""
-    try:
-        if message.text == "📸 Аналізувати фото":
-            await message.answer("📸 Надішліть фото їжі для аналізу")
-            return
+    if message.photo:
+        try:
+            photo = message.photo[-1]
+            file_info = await bot.get_file(photo.file_id)
+            file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info.file_path}"
             
-        photo = message.photo[-1]
-        file_info = await bot.get_file(photo.file_id)
-        file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info.file_path}"
-        
-        processing_msg = await message.answer("🔄 Завантажую та аналізую фото...")
-        
-        # Зберігаємо користувача
-        await save_user(
-            message.from_user.id, 
-            message.from_user.username, 
-            message.from_user.first_name
-        )
-        
-        analysis_result = await analyze_image_with_openai(file_url)
-        calories, proteins, fats, carbs = parse_nutrition_from_response(analysis_result)
-        
-        # Зберігаємо аналіз
-        await save_food_analysis(
-            user_id=message.from_user.id,
-            entry_type="photo",
-            input_data=file_info.file_path,
-            analysis_result=analysis_result,
-            calories=calories,
-            proteins=proteins,
-            fats=fats,
-            carbs=carbs
-        )
-        
-        response_text = f"🔍 **Результат аналізу:**\n\n{analysis_result}\n\n💾 **Збережено в історію!**"
-        
-        # Обрізаємо якщо занадто довге повідомлення
-        if len(response_text) > 4000:
-            response_text = response_text[:4000] + "..."
+            processing_msg = await message.answer("🔄 Завантажую та аналізую фото...")
+            analysis_result = await analyze_image_with_openai(file_url)
+            calories, proteins, fats, carbs = parse_nutrition_from_response(analysis_result)
             
-        await processing_msg.edit_text(response_text)
-        
-    except Exception as e:
-        logger.error(f"❌ Помилка в handle_photo: {e}")
-        await message.answer(f"❌ Сталася помилка під час аналізу. Спробуйте ще раз.")
+            await save_food_analysis(
+                user_id=message.from_user.id,
+                entry_type="photo",
+                input_data=file_info.file_path,
+                analysis_result=analysis_result,
+                calories=calories,
+                proteins=proteins,
+                fats=fats,
+                carbs=carbs
+            )
+            
+            await processing_msg.edit_text(f"🔍 **Результат аналізу:**\n\n{analysis_result}\n\n💾 **Збережено в історію!**")
+            
+        except Exception as e:
+            await message.answer(f"❌ Помилка: {str(e)}")
 
-@dp.message(lambda message: message.text and message.text not in ["/start", "📸 Аналізувати фото", "📊 Моя статистика", "ℹ️ Допомога", "/ping"])
+@dp.message(lambda message: message.text and message.text not in ["/start", "📸 Аналізувати фото", "📊 Моя статистика", "ℹ️ Допомога"])
 async def handle_text_description(message: types.Message):
-    """Обробник текстового опису їжі"""
     try:
         processing_msg = await message.answer("🤔 Аналізую опис страви...")
-        
-        # Зберігаємо користувача
-        await save_user(
-            message.from_user.id, 
-            message.from_user.username, 
-            message.from_user.first_name
-        )
         
         def analyze_text_with_openai(text: str) -> str:
             response = openai_client.chat.completions.create(
@@ -450,20 +386,13 @@ async def handle_text_description(message: types.Message):
             carbs=carbs
         )
         
-        response_text = f"🔍 **Результат аналізу:**\n\n{analysis_result}\n\n💾 **Збережено в історію!**"
-        
-        if len(response_text) > 4000:
-            response_text = response_text[:4000] + "..."
-            
-        await processing_msg.edit_text(response_text)
+        await processing_msg.edit_text(f"🔍 **Результат аналізу:**\n\n{analysis_result}\n\n💾 **Збережено в історію!**")
         
     except Exception as e:
-        logger.error(f"❌ Помилка в handle_text_description: {e}")
         await message.answer(f"❌ Помилка: {str(e)}")
 
 @dp.message(lambda message: message.text == "📊 Моя статистика")
 async def statistics_handler(message: types.Message):
-    """Обробник статистики"""
     try:
         stats = await get_user_statistics(message.from_user.id)
         
@@ -488,23 +417,16 @@ async def statistics_handler(message: types.Message):
         await message.answer(stats_text)
         
     except Exception as e:
-        logger.error(f"❌ Помилка в statistics_handler: {e}")
         await message.answer(f"❌ Помилка отримання статистики: {str(e)}")
 
 @dp.message(lambda message: message.text == "ℹ️ Допомога")
 async def help_handler(message: types.Message):
-    """Обробник допомоги"""
     help_text = """
 📖 **Як користуватися ботом:**
 
 1. **Фото аналіз** - надішли чітке фото їжі
 2. **Текстовий аналіз** - опиши страву текстом
 3. **Статистика** - переглядай історію аналізів
-
-💡 **Поради:**
-- Робіть чіткі фото при хорошому освітленні
-- Надсилайте фото зверху для кращого аналізу
-- Описуйте їжу детально для точнішого аналізу
 """
     await message.answer(help_text)
 
@@ -512,28 +434,9 @@ async def help_handler(message: types.Message):
 # Запуск бота
 # -------------------------
 async def main():
-    """Основна функція запуску"""
     logger.info("🤖 Бот запускається...")
-    
-    # Перевіряємо базу даних
-    db_ok = await check_database_health()
-    if not db_ok:
-        logger.error("❌ Проблема з підключенням до БД")
-    
     await init_database()
-    
-    # Запускаємо асинхронний пінг
-    asyncio.create_task(run_async_ping())
-    
-    logger.info("✅ Бот готов до роботи")
-    
-    # Запускаємо опитування
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("⏹️ Бот зупинено")
-    except Exception as e:
-        logger.error(f"❌ Критична помилка: {e}")
+    asyncio.run(main())
