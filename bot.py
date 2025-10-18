@@ -1,4 +1,4 @@
-
+```python
 import os
 import asyncio
 import base64
@@ -13,7 +13,7 @@ from aiogram.filters import Command
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram.client.session.aiohttp import AiohttpSession
-from openai import OpenAI
+import openai
 from psycopg2 import OperationalError, InterfaceError
 
 # -------------------------
@@ -34,7 +34,7 @@ if not TELEGRAM_TOKEN or not OPENAI_API_KEY or not DATABASE_URL:
 logger.info("✅ Ключі завантажені успішно")
 
 # Ініціалізація
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+openai.api_key = OPENAI_API_KEY
 storage = MemoryStorage()
 session = AiohttpSession()
 bot = Bot(token=TELEGRAM_TOKEN, session=session)
@@ -252,8 +252,8 @@ async def analyze_image_with_openai(image_url: str) -> str:
         base64_image = await download_and_encode_image(image_url)
         
         def sync_openai_call():
-            response = openai_client.chat.completions.create(
-                model="gpt-4o",
+            response = openai.ChatCompletion.create(
+                model="gpt-4-vision-preview",
                 messages=[{
                     "role": "user",
                     "content": [
@@ -415,7 +415,7 @@ async def handle_text_description(message: types.Message):
         )
         
         def analyze_text_with_openai(text: str) -> str:
-            response = openai_client.chat.completions.create(
+            response = openai.ChatCompletion.create(
                 model="gpt-3.5-turbo",
                 messages=[{
                     "role": "user", 
@@ -537,3 +537,4 @@ if __name__ == "__main__":
         logger.info("⏹️ Бот зупинено")
     except Exception as e:
         logger.error(f"❌ Критична помилка: {e}")
+```
